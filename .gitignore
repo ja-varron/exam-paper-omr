@@ -1,7 +1,6 @@
 /lib/
 /lib64/
 /include/
-/pyvenv.cfg
 /share/
 /backend/__pycache__/
 
