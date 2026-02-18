@@ -3,6 +3,8 @@
 /lib64/
 /include/
 /pyvenv.cfg
+/share/
+/backend/__pycache__/
 
 .venv/
 venv/
