@@ -30,7 +30,7 @@ cd exam-paper-omr
 2. **Create and activate a virtual environment**
 ```bash
 source bin/activate # Linux/Mac
-venv\Scripts\activate # Windows
+bin\activate # Windows
 ```
 
 3. **Install required packages**
