@@ -16,7 +16,7 @@ Exam Paper OMR is an Optical Mark Recognition (OMR) system designed to automatic
 ## 📋 Pre-requisites
 
 Before you begin, ensure you have:
-  - Python3 3.12 and above
+  - Python 3.12 and above
   - Git installed on your machine
 
 ## ✅ Installation Guide
@@ -30,7 +30,7 @@ cd exam-paper-omr
 2. **Create and activate a virtual environment**
 ```bash
 source bin/activate # Linux/Mac
-venv\Scripts\activate # Windows
+bin\activate # Windows
 ```
 
 3. **Install required packages**
@@ -44,6 +44,8 @@ The main packages installed are:
   - imutils
   - Pillow
   - matplotlib
+
+#### Note: Refer to feature/documentation branch for latest documentation update
 
 ## 🚀 Usage Instructions (DISREGARD FOR NOW)
 
