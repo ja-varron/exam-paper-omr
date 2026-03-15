@@ -78,3 +78,54 @@ python backend/omr_main.py --input backend/sample.jpg --output results.csv
 
 Let me know if you want this inserted directly into your README or need a sample OMR script template!
 
+## Backend API (Flask Scaffold)
+
+The repository now includes a Flask backend scaffold in `backend/app` for frontend integration.
+
+### Run API Server
+
+```bash
+python backend/run.py
+```
+
+Default API base URL:
+
+```text
+http://127.0.0.1:8000/api
+```
+
+### Environment Variables
+
+- `FLASK_DEBUG` (default: `0`)
+- `FLASK_SECRET_KEY` (default: `dev-secret-key`)
+- `MAX_CONTENT_LENGTH` (default: `10485760`)
+- `ALLOWED_ORIGINS` (default: `http://localhost:5173,http://127.0.0.1:5173`)
+- `DATABASE_URL` (default: `sqlite:///exam_omr.db`)
+- `SMTP_HOST` (optional, required for real email sending)
+- `SMTP_PORT` (default: `587`)
+- `SMTP_USERNAME` (optional)
+- `SMTP_PASSWORD` (optional)
+- `SMTP_SENDER` (default: `no-reply@tuon.local`)
+- `SMTP_USE_TLS` (default: `1`)
+- `OMR_TEMPLATE_PATH` (optional absolute or relative file path to blank reference sheet)
+
+### Prototype Endpoints
+
+- `GET /api/health`
+- `POST /api/exams/<exam_id>/scan`
+  - multipart/form-data:
+    - `sheet` (required image file)
+    - `studentId` (optional)
+    - `studentName` (optional)
+    - `answerKey` (optional JSON array or comma-separated answers)
+- `GET /api/exams/<exam_id>/results`
+- `GET /api/exams/<exam_id>/analytics`
+- `POST /api/results/<result_id>/feedback`
+- `POST /api/exams/<exam_id>/release`
+  - JSON body supports `recipientEmails: string[]`
+
+### Important Note
+
+Current OMR scoring in `omr_service.py` uses a grid-density extraction with fallback deterministic answers intended for integration testing.
+Replace extraction internals with full contour-based bubble detection tuned for your official answer sheet template before production use.
+
