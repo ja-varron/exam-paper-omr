@@ -135,3 +135,92 @@ def send_release_emails(exam_id: str, recipients: list[str]) -> dict[str, Any]:
             failed += 1
 
     return {"sent": sent, "failed": failed, "skipped": False}
+
+
+def send_account_request_notification_email(
+        admin_email: str,
+        request_payload: dict[str, Any],
+        app_url: str = "https://app.tuon.local",
+) -> dict[str, Any]:
+        """Notify admin that a new account request was submitted."""
+        cfg = _smtp_config()
+
+        if not admin_email:
+                return {
+                        "sent": 0,
+                        "failed": 1,
+                        "skipped": True,
+                        "reason": "Admin notification email is not configured.",
+                }
+
+        if not cfg["host"]:
+                return {
+                        "sent": 0,
+                        "failed": 1,
+                        "skipped": True,
+                        "reason": "SMTP_HOST is not configured.",
+                }
+
+        first_name = str(request_payload.get("first_name") or "").strip()
+        last_name = str(request_payload.get("last_name") or "").strip()
+        full_name = f"{first_name} {last_name}".strip() or "Applicant"
+        role = str(request_payload.get("role") or "Student").strip() or "Student"
+        email = str(request_payload.get("email") or "").strip()
+        prc_exam_type = str(request_payload.get("prc_exam_type") or "").strip()
+        request_message = str(request_payload.get("request_message") or "").strip()
+
+        msg = EmailMessage()
+        msg["Subject"] = f"New Account Request: {role} - {full_name}"
+        msg["From"] = cfg["sender"]
+        msg["To"] = admin_email
+
+        dashboard_url = f"{app_url.rstrip('/')}/admin/accounts"
+
+        plain_text = (
+                "A new account request has been submitted.\n\n"
+                f"Name: {full_name}\n"
+                f"Email: {email}\n"
+                f"Requested Role: {role}\n"
+                f"PRC Exam: {prc_exam_type or 'Not provided'}\n"
+                f"Message: {request_message or 'None'}\n\n"
+                f"Review request: {dashboard_url}"
+        )
+
+        html_content = f"""
+        <html>
+            <body style="font-family: Arial, sans-serif; color: #1f2937;">
+                <div style="max-width: 640px; margin: 0 auto; padding: 20px;">
+                    <h2 style="color: #0f766e;">New Account Request Submitted</h2>
+                    <p>A new account request is waiting for your review.</p>
+
+                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 14px; margin: 16px 0;">
+                        <p><strong>Name:</strong> {full_name}</p>
+                        <p><strong>Email:</strong> {email}</p>
+                        <p><strong>Requested Role:</strong> {role}</p>
+                        <p><strong>PRC Exam:</strong> {prc_exam_type or 'Not provided'}</p>
+                        <p><strong>Message:</strong> {request_message or 'None'}</p>
+                    </div>
+
+                    <p>
+                        <a href="{dashboard_url}" style="display:inline-block;padding:10px 14px;border-radius:6px;background:#0f766e;color:#ffffff;text-decoration:none;">
+                            Review in Admin Accounts
+                        </a>
+                    </p>
+                </div>
+            </body>
+        </html>
+        """
+
+        msg.set_content(plain_text)
+        msg.add_alternative(html_content, subtype="html")
+
+        try:
+                with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as server:
+                        if cfg["use_tls"]:
+                                server.starttls()
+                        if cfg["username"] and cfg["password"]:
+                                server.login(cfg["username"], cfg["password"])
+                        server.send_message(msg)
+                return {"sent": 1, "failed": 0, "skipped": False}
+        except Exception as exc:
+                return {"sent": 0, "failed": 1, "skipped": False, "error": str(exc)}

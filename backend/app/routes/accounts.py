@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import os
 from threading import Lock
@@ -12,7 +13,10 @@ from ..services.assigned_exams_cache import (
     invalidate_assigned_exams_cache_for_student,
     set_assigned_exams_cache,
 )
-from ..services.notification_service import send_account_creation_email
+from ..services.notification_service import (
+    send_account_creation_email,
+    send_account_request_notification_email,
+)
 from ..services.profile_cache import cache_instructor_names, get_cached_instructor_names
 
 accounts_bp = Blueprint("accounts", __name__)
@@ -31,6 +35,11 @@ _profiles_select_cache: str | None = None
 _exams_select_cache: str | None = None
 _results_select_cache: str | None = None
 _results_order_cache: str | None = None
+
+
+def _frontend_app_url() -> str:
+    value = os.getenv("APP_URL", "").strip()
+    return value or "https://app.tuon.local"
 
 
 def _ordered_candidates(cached: str | None, candidates: list[str]) -> list[str]:
@@ -74,6 +83,17 @@ def _table_missing_response(text: str) -> bool:
 def _missing_column_response(text: str) -> bool:
     lowered = (text or "").lower()
     return "column" in lowered and "does not exist" in lowered
+
+
+def _account_requests_table_missing(text: str) -> bool:
+    lowered = (text or "").lower()
+    return "account_requests" in lowered and (
+        "does not exist" in lowered
+        or "not found" in lowered
+        or "relation" in lowered
+        or "could not find the table" in lowered
+        or "schema cache" in lowered
+    )
 
 
 def _parse_json_value(value):
@@ -387,6 +407,64 @@ def update_account(user_id: str):
 
         account = profile_body[0] if isinstance(profile_body, list) and profile_body else profile_body
         return jsonify({"success": True, "account": account}), 200
+    except requests.Timeout:
+        return jsonify({"error": "Request timeout when contacting Supabase"}), 504
+    except requests.RequestException:
+        return jsonify({"error": "Failed to contact Supabase"}), 503
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "message": str(e)}), 500
+
+
+@accounts_bp.delete("/accounts/<user_id>")
+def delete_account(user_id: str):
+    """Delete an existing Student/Instructor account using service-role privileges."""
+    try:
+        user_id = str(user_id or "").strip()
+        if not user_id:
+            return jsonify({"error": "user_id is required"}), 400
+
+        supabase_url, service_role_key = _supabase_admin_config()
+        if not supabase_url or not service_role_key:
+            return jsonify({"error": "Missing Supabase configuration"}), 500
+
+        headers = _supabase_admin_headers(service_role_key)
+
+        auth_api_url = f"{supabase_url}/auth/v1/admin/users/{user_id}"
+        auth_response = requests.delete(auth_api_url, headers=headers, timeout=10)
+
+        try:
+            auth_body = auth_response.json()
+        except requests.exceptions.JSONDecodeError:
+            auth_body = {}
+
+        # If auth user is already gone, ensure any profile row is removed and return success.
+        if auth_response.status_code == 404:
+            profile_api_url = f"{supabase_url}/rest/v1/profiles?user_id=eq.{user_id}"
+            profile_response = requests.delete(profile_api_url, headers=headers, timeout=10)
+            if profile_response.status_code >= 400:
+                try:
+                    profile_body = profile_response.json()
+                except requests.exceptions.JSONDecodeError:
+                    profile_body = {}
+                message = (
+                    profile_body.get("message")
+                    if isinstance(profile_body, dict)
+                    else "Failed to clean up account profile"
+                )
+                return jsonify({"error": message or "Failed to clean up account profile"}), profile_response.status_code
+
+            return jsonify({"success": True, "alreadyDeleted": True}), 200
+
+        if auth_response.status_code >= 400:
+            message = (
+                auth_body.get("msg")
+                or auth_body.get("message")
+                or auth_body.get("error_description")
+                or "Failed to delete account"
+            )
+            return jsonify({"error": message}), auth_response.status_code
+
+        return jsonify({"success": True}), 200
     except requests.Timeout:
         return jsonify({"error": "Request timeout when contacting Supabase"}), 504
     except requests.RequestException:
@@ -928,6 +1006,238 @@ def list_student_assigned_exams(student_id: str):
 
         set_assigned_exams_cache(student_id, cache_limit, cache_offset, response_payload)
         return jsonify(response_payload), 200
+    except requests.Timeout:
+        return jsonify({"error": "Request timeout when contacting Supabase"}), 504
+    except requests.RequestException:
+        return jsonify({"error": "Failed to contact Supabase"}), 503
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "message": str(e)}), 500
+
+
+@accounts_bp.post("/account-requests")
+def create_account_request():
+    """Submit a self-service account request for admin review."""
+    try:
+        data = request.get_json(silent=True) or {}
+
+        first_name = str(data.get("firstName", "")).strip()
+        middle_name = str(data.get("middleName", "")).strip()
+        last_name = str(data.get("lastName", "")).strip()
+        email = str(data.get("email", "")).strip().lower()
+        role = str(data.get("role", "Student")).strip().title()
+        prc_exam_type = str(data.get("prcExamType", "")).strip()
+        request_message = str(data.get("requestMessage", "")).strip()
+        app_url = str(data.get("appUrl", "")).strip() or _frontend_app_url()
+
+        if not first_name or not last_name or not email:
+            return jsonify({"error": "firstName, lastName, and email are required"}), 400
+
+        if role not in {"Student", "Instructor"}:
+            return jsonify({"error": "role must be Student or Instructor"}), 400
+
+        if not prc_exam_type:
+            return jsonify({"error": "prcExamType is required"}), 400
+
+        if "@" not in email or "." not in email.split("@")[-1]:
+            return jsonify({"error": "Invalid email format"}), 400
+
+        if len(request_message) > 2000:
+            return jsonify({"error": "requestMessage cannot exceed 2000 characters"}), 400
+
+        supabase_url, service_role_key = _supabase_admin_config()
+        if not supabase_url or not service_role_key:
+            return jsonify({"error": "Missing Supabase configuration"}), 500
+
+        headers = _supabase_admin_headers(service_role_key)
+
+        # Reject request if the email already has a registered account.
+        profiles_url = f"{supabase_url}/rest/v1/profiles"
+        profile_params = {
+            "select": "user_id",
+            "email": f"eq.{email}",
+            "limit": "1",
+        }
+        profile_response = requests.get(profiles_url, headers=headers, params=profile_params, timeout=10)
+        try:
+            profile_payload = profile_response.json()
+        except requests.exceptions.JSONDecodeError:
+            profile_payload = []
+
+        if profile_response.status_code >= 400:
+            message = profile_payload.get("message") if isinstance(profile_payload, dict) else "Failed to validate email"
+            return jsonify({"error": message or "Failed to validate email"}), profile_response.status_code
+
+        if isinstance(profile_payload, list) and profile_payload:
+            return jsonify({"error": "Email already registered"}), 409
+
+        # Prevent duplicate pending requests for the same email.
+        requests_url = f"{supabase_url}/rest/v1/account_requests"
+        pending_params = {
+            "select": "id",
+            "email": f"eq.{email}",
+            "status": "eq.pending",
+            "limit": "1",
+        }
+        pending_response = requests.get(requests_url, headers=headers, params=pending_params, timeout=10)
+        try:
+            pending_payload = pending_response.json()
+        except requests.exceptions.JSONDecodeError:
+            pending_payload = []
+
+        if pending_response.status_code >= 400:
+            raw_error = pending_payload if isinstance(pending_payload, str) else str(pending_payload)
+            if _account_requests_table_missing(raw_error):
+                return jsonify({
+                    "error": "account_requests table is missing. Run supabase/create_account_requests_table.sql first.",
+                }), 500
+            message = pending_payload.get("message") if isinstance(pending_payload, dict) else "Failed to validate account request"
+            return jsonify({"error": message or "Failed to validate account request"}), pending_response.status_code
+
+        if isinstance(pending_payload, list) and pending_payload:
+            return jsonify({"error": "A pending request already exists for this email"}), 409
+
+        create_headers = _supabase_admin_headers(service_role_key)
+        create_headers["Prefer"] = "return=representation"
+        create_payload = {
+            "first_name": first_name,
+            "middle_name": middle_name if middle_name else None,
+            "last_name": last_name,
+            "email": email,
+            "role": role,
+            "prc_exam_type": prc_exam_type,
+            "request_message": request_message if request_message else None,
+            "status": "pending",
+        }
+
+        create_response = requests.post(requests_url, headers=create_headers, json=create_payload, timeout=10)
+        try:
+            create_result = create_response.json()
+        except requests.exceptions.JSONDecodeError:
+            create_result = {}
+
+        if create_response.status_code >= 400:
+            raw_error = create_result if isinstance(create_result, str) else str(create_result)
+            if _account_requests_table_missing(raw_error):
+                return jsonify({
+                    "error": "account_requests table is missing. Run supabase/create_account_requests_table.sql first.",
+                }), 500
+            message = create_result.get("message") if isinstance(create_result, dict) else "Failed to submit account request"
+            return jsonify({"error": message or "Failed to submit account request"}), create_response.status_code
+
+        created_request = create_result[0] if isinstance(create_result, list) and create_result else create_result
+        admin_email = os.getenv("ADMIN_NOTIFICATION_EMAIL", "").strip() or os.getenv("SMTP_USERNAME", "").strip()
+        notification = send_account_request_notification_email(
+            admin_email=admin_email,
+            request_payload=created_request if isinstance(created_request, dict) else {},
+            app_url=app_url,
+        )
+
+        return jsonify({"success": True, "request": created_request, "notification": notification}), 201
+    except requests.Timeout:
+        return jsonify({"error": "Request timeout when contacting Supabase"}), 504
+    except requests.RequestException:
+        return jsonify({"error": "Failed to contact Supabase"}), 503
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "message": str(e)}), 500
+
+
+@accounts_bp.get("/account-requests")
+def list_account_requests():
+    """List account requests, optionally filtered by status."""
+    try:
+        status = str(request.args.get("status", "pending")).strip().lower()
+        if status not in {"pending", "approved", "rejected", "all"}:
+            return jsonify({"error": "status must be one of pending, approved, rejected, all"}), 400
+
+        supabase_url, service_role_key = _supabase_admin_config()
+        if not supabase_url or not service_role_key:
+            return jsonify({"error": "Missing Supabase configuration"}), 500
+
+        api_url = f"{supabase_url}/rest/v1/account_requests"
+        headers = _supabase_admin_headers(service_role_key)
+        params = {
+            "select": "id,first_name,middle_name,last_name,email,role,prc_exam_type,request_message,status,review_notes,reviewed_by,reviewed_at,created_at,updated_at",
+            "order": "created_at.desc",
+        }
+        if status != "all":
+            params["status"] = f"eq.{status}"
+
+        response = requests.get(api_url, headers=headers, params=params, timeout=10)
+        try:
+            payload = response.json()
+        except requests.exceptions.JSONDecodeError:
+            payload = {}
+
+        if response.status_code >= 400:
+            raw_error = payload if isinstance(payload, str) else str(payload)
+            if _account_requests_table_missing(raw_error):
+                return jsonify({
+                    "requests": [],
+                    "tableMissing": True,
+                    "warning": "account_requests table is missing. Run supabase/create_account_requests_table.sql first.",
+                }), 200
+            message = payload.get("message") if isinstance(payload, dict) else "Failed to fetch account requests"
+            return jsonify({"error": message or "Failed to fetch account requests"}), response.status_code
+
+        return jsonify({"requests": payload if isinstance(payload, list) else []}), 200
+    except requests.Timeout:
+        return jsonify({"error": "Request timeout when contacting Supabase"}), 504
+    except requests.RequestException:
+        return jsonify({"error": "Failed to contact Supabase"}), 503
+    except Exception as e:
+        return jsonify({"error": "Internal server error", "message": str(e)}), 500
+
+
+@accounts_bp.patch("/account-requests/<request_id>")
+def review_account_request(request_id: str):
+    """Approve or reject an account request."""
+    try:
+        if not request_id:
+            return jsonify({"error": "request_id is required"}), 400
+
+        data = request.get_json(silent=True) or {}
+        status = str(data.get("status", "")).strip().lower()
+        if status not in {"approved", "rejected"}:
+            return jsonify({"error": "status must be approved or rejected"}), 400
+
+        review_notes = str(data.get("reviewNotes", "")).strip()
+        reviewed_by = str(data.get("reviewedBy", "")).strip()
+
+        supabase_url, service_role_key = _supabase_admin_config()
+        if not supabase_url or not service_role_key:
+            return jsonify({"error": "Missing Supabase configuration"}), 500
+
+        api_url = f"{supabase_url}/rest/v1/account_requests"
+        headers = _supabase_admin_headers(service_role_key)
+        headers["Prefer"] = "return=representation"
+        params = {"id": f"eq.{request_id}"}
+        payload = {
+            "status": status,
+            "review_notes": review_notes if review_notes else None,
+            "reviewed_by": reviewed_by if reviewed_by else None,
+            "reviewed_at": datetime.utcnow().isoformat() + "Z",
+        }
+
+        response = requests.patch(api_url, headers=headers, params=params, json=payload, timeout=10)
+        try:
+            result = response.json()
+        except requests.exceptions.JSONDecodeError:
+            result = {}
+
+        if response.status_code >= 400:
+            raw_error = result if isinstance(result, str) else str(result)
+            if _account_requests_table_missing(raw_error):
+                return jsonify({
+                    "error": "account_requests table is missing. Run supabase/create_account_requests_table.sql first.",
+                }), 500
+            message = result.get("message") if isinstance(result, dict) else "Failed to update account request"
+            return jsonify({"error": message or "Failed to update account request"}), response.status_code
+
+        if isinstance(result, list) and not result:
+            return jsonify({"error": "Account request not found"}), 404
+
+        updated_request = result[0] if isinstance(result, list) and result else result
+        return jsonify({"success": True, "request": updated_request}), 200
     except requests.Timeout:
         return jsonify({"error": "Request timeout when contacting Supabase"}), 504
     except requests.RequestException:
