@@ -20,6 +20,11 @@ app.add_middleware(
 )
 
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+
 @app.post("/scan")
 async def scan(file: UploadFile = File(...)):
     if file.content_type not in ALLOWED_TYPES:
