@@ -14,6 +14,11 @@ backend/.env
 venv/
 env/
 ENV/
+__pycache__/
+*.pyc
+__init__.py
+.idea/
+.vscode/
 
 # Supabase CLI temp artifacts
 supabase/.temp/
