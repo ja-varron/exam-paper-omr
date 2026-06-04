@@ -1,8 +1,6 @@
-/bin/
 /lib/
 /lib64/
 /include/
-/pyvenv.cfg
 /share/
 /backend/__pycache__/
 /backend/app/__pycache__/
@@ -18,6 +16,9 @@ env/
 ENV/
 __pycache__/
 *.pyc
+__init__.py
+.idea/
+.vscode/
 
 # Supabase CLI temp artifacts
 supabase/.temp/
